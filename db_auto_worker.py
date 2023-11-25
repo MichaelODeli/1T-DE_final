@@ -28,12 +28,12 @@ def get_data_for_raw_layer(API_KEY, symbols):
     Генерирует данные для сырого слоя DWH за счет получения информации с API.
     ---
     ---
-    params:\n
-    API_KEY - API ключ для сайта alphavantage.co\n
-    symbols - названия курсов, для которых нужно получить данные\n
+    Параметры:\n
+    - API_KEY - API ключ для сайта alphavantage.co\n
+    - symbols - названия курсов, для которых нужно получить данные\n
     ---
-    output: \n
-    pd.DataFrame
+    Вывод: \n
+    pd.DataFrame - данные, полученные с API
     """
     if type(symbols) == str: symbols = [symbols]
     else: pass
@@ -66,11 +66,25 @@ def get_data_for_raw_layer(API_KEY, symbols):
     return pd.DataFrame(data=total_list, columns=['date', 'currency', 'open', 'high', 'low', 'close', 'volume'])
 
 def upload_data_to_raw_layer(raw_data: pd.DataFrame, conn:engine.base.Connection):
+    """
+    Отправка данных на raw слой DWH.
+    ---
+    ---
+    Параметры:
+    - raw_data: pd.DataFrame с данными, которые нужно занести на raw слой. 
+    - conn: подключение к БД
+    ---
+    Вывод:
+    True в случае успешного обновления raw-слоя. Иначе - возврат ошибки.
+    """
     try:
+        # определим типы данных для колонок
         dtype = {
             "date": DateTime
         }
+        # переносим данные в raw-слой
         raw_data.to_sql('raw_data', conn, if_exists='append', dtype=dtype)
+        # выдываем sql-команду для удаления дублей по двум колонкам.
         sql = '''
         DELETE FROM raw_data T1
             USING   raw_data T2
@@ -84,6 +98,16 @@ def upload_data_to_raw_layer(raw_data: pd.DataFrame, conn:engine.base.Connection
         return e
 
 def core_layer_data_worker(conn:engine.base.Connection):
+    """
+    Генерация данных для core-слоя.
+    ---
+    ---
+    Параметры:
+    - conn: подключение к БД.
+    ---
+    Вывод:
+    Обновленные таблицы в БД
+    """
     data_from_db = pd.read_sql('SELECT * FROM raw_data;', conn)
 
     # создаем "родительскую" таблицу для всех курсов
@@ -94,10 +118,13 @@ def core_layer_data_worker(conn:engine.base.Connection):
     # генерируем таблицы с данными по отдельным курсам.
     dtype = {"date": DateTime}
     for cur_name in data_from_db['currency'].unique():
+        # создаем копию датафрейма только по нужному курсу
         copy_df = data_from_db[data_from_db['currency']==cur_name].copy(deep=True)
         copy_df = copy_df[['date', 'open', 'high', 'low', 'close', 'volume']]
+        # добавляем столбцы с идентификатоами курсов и нумерацией колонок
         copy_df['cur_id'] = [total_df[total_df['cur_name']==cur_name]['cur_id'].tolist()[0]]*len(copy_df)
         copy_df['id'] = range(len(copy_df))
         copy_df = copy_df[['id', 'cur_id', 'date', 'open', 'high', 'low', 'close', 'volume']]
+        # переносим данные в БД, не забыв о добавлении foreign ключа
         copy_df.to_sql(f'core_{cur_name.lower()}_curdata', conn, if_exists='replace', index=False, dtype=dtype)
         conn.execute(f'ALTER TABLE core_{cur_name}_curdata ADD CONSTRAINT cur_id FOREIGN KEY (cur_id) REFERENCES core_currencies (cur_id);')
