@@ -1,6 +1,9 @@
+# API-ключ от сайта www.alphavantage.co
 def params_apikey(): return 'NONE'
+# валюты и акции для наблюдения
 def params_currencies(): return ['AAPL', 'GOOGL', 'AMD', 'IBM']
 
+# параметры подключения к БД
 def get_data_db(): return "postgresql+psycopg2"
 def get_data_login(): return "postgres"
 def get_data_password(): return "postgres"

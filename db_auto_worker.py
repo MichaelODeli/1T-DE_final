@@ -9,8 +9,7 @@ import project_settings as ps
 from airflow.models.dag import DAG
 
 # Operators; we need this to operate!
-from airflow.operators.bash import BashOperator
-from airflow.operators.python import PythonOperator, task
+from airflow.operators.python import task
 
 def get_conn():
     db = ps.get_data_db()
