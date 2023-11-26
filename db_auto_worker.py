@@ -204,3 +204,4 @@ def mart_layer_worker(conn:engine.base.Connection):
         diff_mart_layer.index = diff_mart_layer.index + 1  # shifting index
         diff_mart_layer = diff_mart_layer.sort_index()  # sorting by index
     diff_mart_layer.to_sql('mart_delta', conn, if_exists='replace')
+    
