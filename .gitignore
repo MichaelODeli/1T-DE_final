@@ -3,3 +3,4 @@ api key for alpha vantage.txt
 *.dtmp
 *.ipynb
 *.pyc
+logs/
