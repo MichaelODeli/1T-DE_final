@@ -24,9 +24,9 @@ def get_conn():
     if not database_exists(engine.url):
         create_database(engine.url)
 
-    conn = engine.connect()
+    pgconn = engine.connect()
 
-    return conn
+    return pgconn
 
 with DAG(
     "currency_updater",
@@ -42,20 +42,20 @@ with DAG(
         "retry_delay": timedelta(days=1)
     },
     description="DAG by MichaelODeli",
-    start_date=datetime(2023, 26, 11),
+    start_date=datetime(2023, 11, 26),
     catchup=False,
     tags=["1T"],
 ) as dag:
-    conn = get_conn()
+    pgconn = get_conn()
 
     @task(task_id="raw_layer_data_worker")
-    def raw_layer_data_worker(conn:engine.base.Connection, API_KEY=str(ps.params_apikey()), symbols=list(ps.params_currencies())):
+    def raw_layer_data_worker(pgconn:engine.base.Connection, API_KEY=str(ps.params_apikey()), symbols=list(ps.params_currencies())):
         """
         Отправка данных на raw слой DWH.
         ---
         ---
         Параметры:
-        - conn: подключение к БД
+        - pgconn: подключение к БД
         - API_KEY - API ключ для сайта alphavantage.co\n
         - symbols - названия курсов, для которых нужно получить данные\n
         ---
@@ -98,7 +98,7 @@ with DAG(
                 "date": DateTime
             }
             # переносим данные в raw-слой
-            raw_data.to_sql('raw_data', conn, if_exists='append', dtype=dtype)
+            raw_data.to_sql('raw_data', pgconn, if_exists='append', dtype=dtype)
             # выдываем sql-команду для удаления дублей по двум колонкам.
             sql = '''
             DELETE FROM raw_data T1
@@ -107,29 +107,30 @@ with DAG(
                 AND T1.date = T2.date 
                 AND T1.currency  = T2.currency;
             '''
-            conn.execute(sql)
+            pgconn.execute(sql)
             return True
         except Exception as e:
             return e
 
     @task(task_id="core_layer_data_worker")
-    def core_layer_data_worker(conn:engine.base.Connection):
+    def core_layer_data_worker(pgconn:engine.base.Connection):
         """
         Генерация данных для core-слоя.
         ---
         ---
         Параметры:
-        - conn: подключение к БД.
+        - pgconn: подключение к БД.
         ---
         Вывод:
         Обновленные таблицы в БД
         """
-        data_from_db = pd.read_sql('SELECT * FROM raw_data;', conn)
+        data_from_db = pd.read_sql('SELECT * FROM raw_data;', pgconn)
 
         # создаем "родительскую" таблицу для всех курсов
         total_df = pd.DataFrame(columns=['cur_id', 'cur_name'], data=list(zip(range(len(data_from_db['currency'].unique())), data_from_db['currency'].unique())))
-        total_df.to_sql('core_currencies', conn, if_exists='replace', index=False)
-        conn.execute('ALTER TABLE core_currencies ADD PRIMARY KEY (cur_id);')
+        pgconn.execute('DROP TABLE IF EXISTS core_currencies CASCADE')
+        total_df.to_sql('core_currencies', pgconn, if_exists='replace', index=False)
+        pgconn.execute('ALTER TABLE core_currencies ADD PRIMARY KEY (cur_id);')
 
         # генерируем таблицы с данными по отдельным курсам.
         dtype = {"date": DateTime}
@@ -142,29 +143,29 @@ with DAG(
             copy_df['id'] = range(len(copy_df))
             copy_df = copy_df[['id', 'cur_id', 'date', 'open', 'high', 'low', 'close', 'volume']]
             # переносим данные в БД, не забыв о добавлении foreign ключа
-            copy_df.to_sql(f'core_{cur_name.lower()}_curdata', conn, if_exists='replace', index=False, dtype=dtype)
-            conn.execute(f'ALTER TABLE core_{cur_name}_curdata ADD CONSTRAINT cur_id FOREIGN KEY (cur_id) REFERENCES core_currencies (cur_id);')
+            copy_df.to_sql(f'core_{cur_name.lower()}_curdata', pgconn, if_exists='replace', index=False, dtype=dtype)
+            pgconn.execute(f'ALTER TABLE core_{cur_name}_curdata ADD CONSTRAINT cur_id FOREIGN KEY (cur_id) REFERENCES core_currencies (cur_id);')
 
     @task(task_id="mart_layer_worker")
-    def mart_layer_worker(conn:engine.base.Connection):
+    def mart_layer_worker(pgconn:engine.base.Connection):
         """
         Генерация данных для слоя mart.
         ---
         ---
         Параметры:
-        - conn: подключение к БД.
+        - pgconn: подключение к БД.
         ---
         Вывод:
         Обновленные таблицы в БД
         """
-        total_df = pd.read_sql('select * from core_currencies;', conn)
+        total_df = pd.read_sql('select * from core_currencies;', pgconn)
 
         # генерация таблиц с полными данными по всему слепку
         full_mart_layer = pd.DataFrame(columns=['datestamp', 'currency_name', 'total_volume', 'open_price', 'close_price', 'difference', 'max_value_time', 'max_price_time', 'min_price_time'])
         dtype = {"datestamp": DateTime}
         for cur_name in total_df['cur_name']:
             # получаем данные по нужному курсу
-            data_df = pd.read_sql(f'select * from core_{cur_name.lower()}_curdata', conn).sort_values(by='date', ascending=False)
+            data_df = pd.read_sql(f'select * from core_{cur_name.lower()}_curdata', pgconn).sort_values(by='date', ascending=False)
 
             # проходимся по всем датам и считаем статистику
             for selected_date in data_df['date'].dt.date.unique():
@@ -187,17 +188,17 @@ with DAG(
                 full_mart_layer.loc[-1] = [
                     selected_date,
                     cur_name, 
-                    sum(selected_date_df['volume']), 
+                    sum(selected_date_df['volume'].astype(float)), 
                     selected_date_df.head(1)['open'].tolist()[0],
                     selected_date_df.tail(1)['close'].tolist()[0],
-                    selected_date_df.tail(1)['close'].tolist()[0]/selected_date_df.head(1)['open'].tolist()[0]*100-100, 
+                    selected_date_df.tail(1)['close'].astype(float).tolist()[0]/selected_date_df.head(1)['open'].astype(float).tolist()[0]*100-100, 
                     max_value_time, 
                     max_price_time, 
                     min_price_time]  # adding a row
                 full_mart_layer.index = full_mart_layer.index + 1  # shifting index
                 full_mart_layer = full_mart_layer.sort_index()  # sorting by index
         # заносим данные в mark-таблицу с перезаписью
-        full_mart_layer.to_sql('mart_full', conn, if_exists='replace', dtype=dtype)
+        full_mart_layer.to_sql('mart_full', pgconn, if_exists='replace', dtype=dtype)
 
         # генерация таблиц по данным за последние сутки
         diff_mart_layer = pd.DataFrame(columns=['dates_diff', 'currency_name', 'total_volume', 'open_price', 'close_price', 'difference'])
@@ -205,6 +206,9 @@ with DAG(
             data_df = full_mart_layer[full_mart_layer['currency_name'] == currency_name].copy(deep=True).tail(2)
             dates_diff = ' - '.join([str(i) for i in data_df['datestamp'].tolist()])
             data_df = data_df[['total_volume', 'open_price', 'close_price', 'difference']]
+            data_df['total_volume'] = data_df['total_volume'].astype(float)
+            data_df['open_price'] = data_df['open_price'].astype(float)
+            data_df['close_price'] = data_df['close_price'].astype(float)
             diff_mart_layer.loc[-1] = [
                 dates_diff,
                 currency_name,
@@ -215,7 +219,7 @@ with DAG(
             ]
             diff_mart_layer.index = diff_mart_layer.index + 1  # shifting index
             diff_mart_layer = diff_mart_layer.sort_index()  # sorting by index
-        diff_mart_layer.to_sql('mart_delta', conn, if_exists='replace')
+        diff_mart_layer.to_sql('mart_delta', pgconn, if_exists='replace')
 
 
-    raw_layer_data_worker(conn=conn) >> core_layer_data_worker(conn) >> mart_layer_worker(conn)
+    raw_layer_data_worker(pgconn=pgconn) >> core_layer_data_worker(pgconn) >> mart_layer_worker(pgconn)
